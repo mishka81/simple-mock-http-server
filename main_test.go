@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net/http"
@@ -287,5 +288,42 @@ func TestGivenMissingEnvFile_WhenRead_ThenReturnEmpty(t *testing.T) {
 	// THEN
 	if len(values) != 0 {
 		t.Errorf("values = %v, want empty", values)
+	}
+}
+
+func TestGivenDebugMode_WhenRequest_ThenLogHeadersAndBody(t *testing.T) {
+	// GIVEN
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(io.Discard)
+	s := newServer(t, map[string]string{"routes.json": `{"routes": [{"path": "/*", "body": {}}]}`})
+	s.debug = true
+	req := httptest.NewRequest("POST", "/api/items?a=1", strings.NewReader("name=abc"))
+	req.Header.Set("X-Trace", "t1")
+
+	// WHEN
+	do(s, req)
+
+	// THEN
+	for _, want := range []string{"debug request: POST /api/items?a=1", "header X-Trace: t1", `body (8 bytes): "name=abc"`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log %q does not contain %q", logs.String(), want)
+		}
+	}
+}
+
+func TestGivenNoDebugMode_WhenRequest_ThenNoDetailedLog(t *testing.T) {
+	// GIVEN
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(io.Discard)
+	s := newServer(t, map[string]string{"routes.json": `{"routes": [{"path": "/*", "body": {}}]}`})
+
+	// WHEN
+	get(s, "/x")
+
+	// THEN
+	if strings.Contains(logs.String(), "debug request") {
+		t.Errorf("unexpected debug log: %q", logs.String())
 	}
 }

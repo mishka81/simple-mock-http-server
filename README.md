@@ -22,7 +22,7 @@ Default location: `~/.local/share/shttpmocksrv` (`mock.env`, `routes.json`, `log
 
 ## Configuration
 
-- `mock.env`: `HTTP_PORT` (default 80), `HTTPS_PORT` (default 443), `SERVER_NAMES` (hostnames and IPs in the certificate). After a change: `launchctl kickstart -k gui/$(id -u)/local.shttpmocksrv` (re-run the installer with `--hostnames` if `SERVER_NAMES` changed, to reissue the certificate).
+- `mock.env`: `HTTP_PORT` (default 80), `HTTPS_PORT` (default 443), `SERVER_NAMES` (hostnames and IPs in the certificate), `DEBUG` (`true` to log every request in detail, see Logs). After a change: `launchctl kickstart -k gui/$(id -u)/local.shttpmocksrv` (re-run the installer with `--hostnames` if `SERVER_NAMES` changed, to reissue the certificate).
 - `routes.json`: the response for each URL. It is re-read on every request, so edits apply immediately.
 
 ### Routes
@@ -90,7 +90,9 @@ install.sh --hostnames "localhost 127.0.0.1 ::1 api.example.com" --hosts --trust
 
 ## Logs
 
-`logs/shttpmocksrv.log` shows each request (scheme, method, URI, scenario, status, form body), useful to check what a client sends.
+`logs/shttpmocksrv.log` shows each request (scheme, method, URI, scenario, status, request body), useful to check what a client sends.
+
+Debug mode (`DEBUG=true` in `mock.env`, or the `-debug` flag) adds a detailed entry for every HTTP and HTTPS request before the summary line: client address, protocol, host, TLS version, SNI and ALPN, all headers, and the body (up to 1 MiB). Restart the agent after changing `mock.env`.
 
 ## Development and release
 

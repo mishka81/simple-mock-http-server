@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -40,13 +41,15 @@ type reply struct {
 }
 
 type server struct {
-	dir string
+	dir   string
+	debug bool
 }
 
 func main() {
 	dir := flag.String("dir", ".", "project directory (mock.env, routes.json, certs/)")
 	httpPort := flag.String("http-port", "", "HTTP port (overrides HTTP_PORT in mock.env)")
 	httpsPort := flag.String("https-port", "", "HTTPS port (overrides HTTPS_PORT in mock.env)")
+	debug := flag.Bool("debug", false, "log every request in detail: client, TLS, headers and body (or DEBUG=true in mock.env)")
 	flag.Parse()
 
 	env := readEnvFile(filepath.Join(*dir, "mock.env"))
@@ -62,7 +65,7 @@ func main() {
 	cfgHTTP := pick(*httpPort, "HTTP_PORT", "80")
 	cfgHTTPS := pick(*httpsPort, "HTTPS_PORT", "443")
 
-	s := &server{dir: *dir}
+	s := &server{dir: *dir, debug: *debug || isTrue(env["DEBUG"])}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 
@@ -90,6 +93,9 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rep := s.respond(r.Method, r.URL.Path, scenario)
+	if s.debug {
+		log.Print(dumpRequest(r, reqBody))
+	}
 
 	if rep.contentType != "" {
 		w.Header().Set("Content-Type", rep.contentType)
@@ -102,6 +108,33 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		scheme = "https"
 	}
 	log.Printf("%s %s %s scenario=%s status=%d body=%q", scheme, r.Method, r.URL.RequestURI(), scenario, rep.status, reqBody)
+}
+
+// dumpRequest renders everything a client sent: client address, protocol, TLS details, headers and body.
+func dumpRequest(r *http.Request, body []byte) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "debug request: %s %s %s from %s host=%q\n", r.Method, r.URL.RequestURI(), r.Proto, r.RemoteAddr, r.Host)
+	if r.TLS != nil {
+		fmt.Fprintf(&b, "  tls: %s sni=%q alpn=%q\n", tls.VersionName(r.TLS.Version), r.TLS.ServerName, r.TLS.NegotiatedProtocol)
+	}
+	names := make([]string, 0, len(r.Header))
+	for name := range r.Header {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&b, "  header %s: %s\n", name, strings.Join(r.Header[name], ", "))
+	}
+	fmt.Fprintf(&b, "  body (%d bytes): %q", len(body), body)
+	return b.String()
+}
+
+func isTrue(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // respond picks the first route matching the request, re-reading routes.json on every call.
