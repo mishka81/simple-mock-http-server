@@ -327,3 +327,102 @@ func TestGivenNoDebugMode_WhenRequest_ThenNoDetailedLog(t *testing.T) {
 		t.Errorf("unexpected debug log: %q", logs.String())
 	}
 }
+
+func TestGivenServerNames_WhenRequestOtherHost_ThenRefuse(t *testing.T) {
+	// GIVEN
+	s := newServer(t, map[string]string{"routes.json": `{"routes": [{"path": "/*", "body": {}}]}`})
+	s.hosts = parseHosts("api.example.com 127.0.0.1 ::1")
+
+	tests := []struct {
+		host string
+		want int
+	}{
+		{"api.example.com", 200},
+		{"API.example.com:8443", 200},
+		{"127.0.0.1:80", 200},
+		{"[::1]:443", 200},
+		{"localhost", 404},
+		{"localhost:80", 404},
+		{"other.example.com", 404},
+	}
+	for _, tt := range tests {
+		// WHEN
+		req := httptest.NewRequest("GET", "/x", nil)
+		req.Host = tt.host
+		rec := do(s, req)
+
+		// THEN
+		if rec.Code != tt.want {
+			t.Errorf("host %q: status = %d, want %d", tt.host, rec.Code, tt.want)
+		}
+	}
+}
+
+func TestGivenNoServerNames_WhenRequestAnyHost_ThenAnswer(t *testing.T) {
+	// GIVEN
+	s := newServer(t, map[string]string{"routes.json": `{"routes": [{"path": "/*", "body": {}}]}`})
+
+	// WHEN
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Host = "localhost"
+	rec := do(s, req)
+
+	// THEN
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestGivenRouteWithHost_WhenRequest_ThenMatchOnlyThatHost(t *testing.T) {
+	// GIVEN
+	s := newServer(t, map[string]string{"routes.json": `{"routes": [
+		{"host": "test.toto.com", "path": "/api/v2/countries", "body": {"from": "toto"}},
+		{"path": "/*", "body": {"from": "any"}}
+	]}`})
+
+	tests := []struct {
+		host string
+		want string
+	}{
+		{"test.toto.com", `{"from": "toto"}`},
+		{"TEST.toto.com:8443", `{"from": "toto"}`},
+		{"api.example.com", `{"from": "any"}`},
+	}
+	for _, tt := range tests {
+		// WHEN
+		req := httptest.NewRequest("GET", "/api/v2/countries", nil)
+		req.Host = tt.host
+		rec := do(s, req)
+
+		// THEN
+		if got := rec.Body.String(); got != tt.want {
+			t.Errorf("host %q: body = %q, want %q", tt.host, got, tt.want)
+		}
+	}
+}
+
+func TestGivenDeletedLogFile_WhenWrite_ThenRecreateIt(t *testing.T) {
+	// GIVEN
+	path := filepath.Join(t.TempDir(), "logs", "server.log")
+	l := &logFile{path: path}
+	if _, err := l.Write([]byte("first\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// WHEN
+	if _, err := l.Write([]byte("second\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// THEN
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second\n" {
+		t.Errorf("log = %q, want %q", content, "second\n")
+	}
+}

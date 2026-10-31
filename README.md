@@ -14,7 +14,7 @@ curl -fsSL https://github.com/mishka81/simple-mock-http-server/releases/latest/d
 
 No response is installed. Write `~/.local/share/shttpmocksrv/routes.json` (see below), or pass your own file at install time with `--routes PATH`. Until it exists, every request answers `500`.
 
-Options (pass after `bash -s --`): `--version TAG`, `--dir DIR`, `--http-port N`, `--https-port N`, `--hostnames "..."`, `--routes PATH`, `--dev` (build from the local source instead of downloading, needs Go), `--trust` (runs `mkcert -install`, asks for your password), `--hosts` (maps the `--hostnames` in `/etc/hosts`, asks for your password), `--no-service`, `--binary PATH` (install a local binary). See `install.sh --help`.
+Options (pass after `bash -s --`): `--version TAG`, `--dir DIR`, `--http-port N`, `--https-port N`, `--hostnames "..."` (required on a first install), `--routes PATH`, `--dev` (build from the local source instead of downloading, needs Go), `--trust` (runs `mkcert -install`, asks for your password), `--hosts` (maps the `--hostnames` in `/etc/hosts`, asks for your password), `--no-service`, `--binary PATH` (install a local binary). See `install.sh --help`.
 
 The installer is idempotent: running it again changes only what differs. The binary is replaced only if it differs from the release (or from the local build with `--dev`), the certificate is reissued only when the names change, the CA is missing or it expires within 30 days, the `/etc/hosts` block is rewritten only if it differs, and the launchd agent is restarted only when the binary, `mock.env` or the plist changed. An existing `routes.json` is never touched. Remove with `install.sh --uninstall` (add `--purge` to delete config and certs). The mkcert CA is shared with your other projects and is never removed (`mkcert -uninstall` does that).
 
@@ -22,7 +22,7 @@ Default location: `~/.local/share/shttpmocksrv` (`mock.env`, `routes.json`, `log
 
 ## Configuration
 
-- `mock.env`: `HTTP_PORT` (default 80), `HTTPS_PORT` (default 443), `SERVER_NAMES` (hostnames and IPs in the certificate), `DEBUG` (`true` to log every request in detail, see Logs). After a change: `launchctl kickstart -k gui/$(id -u)/local.shttpmocksrv` (re-run the installer with `--hostnames` if `SERVER_NAMES` changed, to reissue the certificate).
+- `mock.env`: `HTTP_PORT` (default 80), `HTTPS_PORT` (default 443), `SERVER_NAMES` (hostnames and IPs in the certificate; the server only answers requests whose `Host` is one of them and replies `404` otherwise, so `localhost` is served only if you list it), `DEBUG` (`true` to log every request in detail, see Logs). After a change: `launchctl kickstart -k gui/$(id -u)/local.shttpmocksrv` (re-run the installer with `--hostnames` if `SERVER_NAMES` changed, to reissue the certificate).
 - `routes.json`: the response for each URL. It is re-read on every request, so edits apply immediately.
 
 ### Routes
@@ -52,6 +52,7 @@ Default location: `~/.local/share/shttpmocksrv` (`mock.env`, `routes.json`, `log
 - Routes are tried in order and the first match wins.
 - `path`: exact (query string ignored), or a prefix when it ends with `*` (`/api/*`, `/*` for everything).
 - `method`: optional, any method when omitted.
+- `host`: optional hostname (one of `SERVER_NAMES`, port ignored), any host when omitted. Use it to give the same path different responses per domain.
 - `status`: optional, 200 by default. With neither `body` nor `file`, the response has an empty body (e.g. `204`).
 - `body`: the JSON to return, inline. `file`: a file to return as is, relative to the install directory. Use one or the other.
 - No route matching answers `404`, and a configuration error (missing or invalid `routes.json`, missing file) answers `500`, both as plain text with the reason.
@@ -74,23 +75,29 @@ A route can define named variants of its response, e.g. to test an error on the 
 Select one per request with a header or a query parameter (the header wins); an unknown name answers `500`:
 
 ```sh
-curl -H 'X-Mock-Scenario: down' http://localhost/api/items
-curl 'http://localhost/api/items?mock_scenario=full'
+curl -H 'X-Mock-Scenario: down' http://api.example.com/api/items
+curl 'http://api.example.com/api/items?mock_scenario=full'
 ```
 
 ## Mocking a real hostname
 
 ```sh
-install.sh --hostnames "localhost 127.0.0.1 ::1 api.example.com" --hosts --trust
+install.sh --hostnames "api.example.com" --hosts --trust
 ```
 
-- `--hostnames` adds the name to the certificate.
+- `--hostnames` sets `SERVER_NAMES`: the names in the certificate, and the only `Host` values the server answers (required on a first install).
 - `--hosts` maps every hostname of that list (except `localhost` and IPs) to `127.0.0.1` and `::1` in `/etc/hosts`. The lines go in a block marked `# BEGIN shttpmocksrv (...)`, which a later run replaces and `--uninstall` removes, so the real service is reachable again. A name you already mapped yourself is left alone.
 - `--trust` makes the mkcert CA trusted system-wide, so browsers and `curl` accept the certificate. Firefox keeps its own store, filled through `certutil` (Homebrew's `nss`): the installer requires it and installs it if missing. Restart Firefox afterwards. A JVM does not use the macOS keychain: add `$(mkcert -CAROOT)/rootCA.pem` to its truststore.
 
+To add a domain later, you can skip `--hostnames`: add the name to `SERVER_NAMES` in `mock.env` and rerun the installer with the same flags. Without `--hostnames` it keeps the existing `SERVER_NAMES`, reissues the certificate and rewrites the `/etc/hosts` block only if the names changed.
+
+```sh
+install.sh --hosts --trust
+```
+
 ## Logs
 
-`logs/shttpmocksrv.log` shows each request (scheme, method, URI, scenario, status, request body), useful to check what a client sends.
+`logs/shttpmocksrv.log` shows each request (scheme, method, URI, scenario, status, request body), useful to check what a client sends. The file is recreated if you delete it, no restart needed (the agent runs with `-log-file`; without the flag the server logs to stderr).
 
 Debug mode (`DEBUG=true` in `mock.env`, or the `-debug` flag) adds a detailed entry for every HTTP and HTTPS request before the summary line: client address, protocol, host, TLS version, SNI and ALPN, all headers, and the body (up to 1 MiB). Restart the agent after changing `mock.env`.
 

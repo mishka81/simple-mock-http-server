@@ -39,8 +39,8 @@ Install
   --name NAME        service name (default: shttpmocksrv)
   --http-port N      HTTP port (default: 80, kept from an existing mock.env when omitted)
   --https-port N     HTTPS port (default: 443)
-  --hostnames "..."  names/IPs in the TLS certificate, space separated
-                     (default: localhost 127.0.0.1 ::1)
+  --hostnames "..."  names/IPs in the TLS certificate, space separated; the server only answers requests for these
+                     names (required on a first install, kept from an existing mock.env when omitted)
   --trust            run 'mkcert -install' to trust the mkcert CA system-wide, Firefox included (asks for your password;
                      installs certutil from Homebrew's nss if missing)
   --hosts            map each hostname of --hostnames (except localhost and IPs) to 127.0.0.1 and ::1 in
@@ -287,6 +287,7 @@ write_config() {
     mkdir -p "$DIR/certs" "$DIR/logs"
 
     if [ ! -f "$DIR/mock.env" ]; then
+        [ -n "$HOSTNAMES" ] || die "--hostnames is required on a first install (the domains to mock, e.g. --hostnames \"api.example.com\")"
         cat >"$DIR/mock.env" <<'EOF'
 # Mock server configuration (read by the shttpmocksrv binary).
 # The responses are configured per URL in routes.json (re-read on every request, no restart needed).
@@ -296,8 +297,9 @@ HTTP_PORT=80
 HTTPS_PORT=443
 
 # Hostnames and IPs covered by the TLS certificate (space separated).
+# The server only answers requests whose Host is one of these names (add localhost to serve it).
 # Re-run the installer after changing this.
-SERVER_NAMES="localhost 127.0.0.1 ::1"
+SERVER_NAMES=""
 EOF
         CHANGED=1
     fi
@@ -343,7 +345,7 @@ generate_certs() {
     ensure_mkcert
     local names
     names="$(get_env SERVER_NAMES)"
-    [ -n "$names" ] || names="localhost 127.0.0.1 ::1"
+    [ -n "$names" ] || die "SERVER_NAMES is empty in $DIR/mock.env (pass --hostnames)"
 
     if cert_is_current "$names"; then
         log "Server certificate already up to date for: $names"
@@ -390,6 +392,8 @@ install_service() {
         <string>$DIR/shttpmocksrv</string>
         <string>-dir</string>
         <string>$DIR</string>
+        <string>-log-file</string>
+        <string>$DIR/logs/shttpmocksrv.log</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$DIR</string>
@@ -418,10 +422,18 @@ EOF
     log "launchd agent '$LABEL' loaded (starts at login)"
 }
 
+# First declared name, as a Host header value (the server refuses other hosts).
+first_name() {
+    local n
+    n="$(get_env SERVER_NAMES | awk '{print $1}')"
+    case "$n" in *:*) n="[$n]" ;; esac
+    printf '%s' "$n"
+}
+
 wait_for_server() {
     local i
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -fs -o /dev/null "http://localhost:$(get_env HTTP_PORT)/"; then
+        if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $(first_name)" "http://127.0.0.1:$(get_env HTTP_PORT)/")" != "000" ]; then
             return 0
         fi
         sleep 1
@@ -442,7 +454,7 @@ generate_certs
 if [ "$NO_SERVICE" -eq 0 ]; then
     install_service
     if wait_for_server; then
-        log "Server answers on http://localhost:$(get_env HTTP_PORT)/"
+        log "Server answers on http://$(first_name):$(get_env HTTP_PORT)/"
     else
         warn "server did not answer, check $DIR/logs/shttpmocksrv.log"
     fi
@@ -457,11 +469,11 @@ Installed in $DIR
   CA:         $(mkcert -CAROOT)/rootCA.pem (mkcert)
 
 HTTPS clients must trust the CA: rerun with --trust ('mkcert -install'), or pass it explicitly, e.g.
-  curl --cacert "\$(mkcert -CAROOT)/rootCA.pem" https://localhost:$(get_env HTTPS_PORT)/
+  curl --cacert "\$(mkcert -CAROOT)/rootCA.pem" https://$(first_name):$(get_env HTTPS_PORT)/
 Java clients (JVM truststore):
   --truststore-paths="\$(mkcert -CAROOT)/rootCA.pem"
 
-To mock a real hostname, add it to --hostnames and use --hosts to map it in /etc/hosts, e.g.:
-  install.sh --hostnames "localhost 127.0.0.1 ::1 api.example.com" --hosts --trust
+To mock another hostname, add it to --hostnames and use --hosts to map it in /etc/hosts, e.g.:
+  install.sh --hostnames "api.example.com" --hosts --trust
 Uninstall:  install.sh --uninstall [--purge]   (name: $NAME)
 EOF

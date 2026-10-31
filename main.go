@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type response struct {
@@ -28,6 +30,7 @@ type response struct {
 }
 
 type route struct {
+	Host      string              `json:"host"`
 	Method    string              `json:"method"`
 	Path      string              `json:"path"`
 	Scenarios map[string]response `json:"scenarios"`
@@ -43,6 +46,8 @@ type reply struct {
 type server struct {
 	dir   string
 	debug bool
+	// hosts are the lowercase hostnames the server answers (SERVER_NAMES); empty means any host.
+	hosts map[string]bool
 }
 
 func main() {
@@ -50,7 +55,12 @@ func main() {
 	httpPort := flag.String("http-port", "", "HTTP port (overrides HTTP_PORT in mock.env)")
 	httpsPort := flag.String("https-port", "", "HTTPS port (overrides HTTPS_PORT in mock.env)")
 	debug := flag.Bool("debug", false, "log every request in detail: client, TLS, headers and body (or DEBUG=true in mock.env)")
+	logPath := flag.String("log-file", "", "write the log to this file, recreating it if it is deleted (default: stderr)")
 	flag.Parse()
+
+	if *logPath != "" {
+		log.SetOutput(&logFile{path: *logPath})
+	}
 
 	env := readEnvFile(filepath.Join(*dir, "mock.env"))
 	pick := func(flagValue, key, fallback string) string {
@@ -65,7 +75,7 @@ func main() {
 	cfgHTTP := pick(*httpPort, "HTTP_PORT", "80")
 	cfgHTTPS := pick(*httpsPort, "HTTPS_PORT", "443")
 
-	s := &server{dir: *dir, debug: *debug || isTrue(env["DEBUG"])}
+	s := &server{dir: *dir, debug: *debug || isTrue(env["DEBUG"]), hosts: parseHosts(env["SERVER_NAMES"])}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 
@@ -84,6 +94,53 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+cfgHTTP, mux))
 }
 
+// logFile is a log writer that reopens its file when it was deleted or replaced (e.g. by a log rotation or a manual
+// cleanup), because a file held open by launchd would keep receiving the output after being unlinked.
+type logFile struct {
+	path string
+	mu   sync.Mutex
+	f    *os.File
+}
+
+func (l *logFile) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stale() {
+		l.reopen()
+	}
+	if l.f == nil {
+		return os.Stderr.Write(p)
+	}
+	return l.f.Write(p)
+}
+
+// stale reports whether the open file is no longer the one at the path (or nothing is open yet).
+func (l *logFile) stale() bool {
+	if l.f == nil {
+		return true
+	}
+	onDisk, err := os.Stat(l.path)
+	if err != nil {
+		return true
+	}
+	open, err := l.f.Stat()
+	return err != nil || !os.SameFile(onDisk, open)
+}
+
+// reopen opens (and creates, with its directory) the log file; on failure it keeps writing to stderr.
+func (l *logFile) reopen() {
+	if l.f != nil {
+		_ = l.f.Close()
+		l.f = nil
+	}
+	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+		return
+	}
+	if f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		l.f = f
+	}
+}
+
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	reqBody, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 
@@ -92,7 +149,16 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		scenario = r.URL.Query().Get("mock_scenario")
 	}
 
-	rep := s.respond(r.Method, r.URL.Path, scenario)
+	if !s.allowsHost(r.Host) {
+		if s.debug {
+			log.Print(dumpRequest(r, reqBody))
+		}
+		log.Printf("refused host %q: %s %s (not in SERVER_NAMES)", r.Host, r.Method, r.URL.RequestURI())
+		http.Error(w, "unknown host", http.StatusNotFound)
+		return
+	}
+
+	rep := s.respond(hostName(r.Host), r.Method, r.URL.Path, scenario)
 	if s.debug {
 		log.Print(dumpRequest(r, reqBody))
 	}
@@ -129,6 +195,30 @@ func dumpRequest(r *http.Request, body []byte) string {
 	return b.String()
 }
 
+func parseHosts(names string) map[string]bool {
+	hosts := map[string]bool{}
+	for _, name := range strings.Fields(names) {
+		hosts[strings.ToLower(strings.Trim(name, "[]"))] = true
+	}
+	return hosts
+}
+
+// allowsHost reports whether the Host header (port ignored) is one of the declared SERVER_NAMES.
+func (s *server) allowsHost(host string) bool {
+	if len(s.hosts) == 0 {
+		return true
+	}
+	return s.hosts[hostName(host)]
+}
+
+// hostName returns the lowercase hostname of a Host header, without port or IPv6 brackets.
+func hostName(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.Trim(host, "[]"))
+}
+
 func isTrue(value string) bool {
 	switch strings.ToLower(value) {
 	case "1", "true", "yes", "on":
@@ -138,7 +228,7 @@ func isTrue(value string) bool {
 }
 
 // respond picks the first route matching the request, re-reading routes.json on every call.
-func (s *server) respond(method, path, scenario string) reply {
+func (s *server) respond(host, method, path, scenario string) reply {
 	routes, err := s.loadRoutes()
 	if err != nil {
 		return textReply(http.StatusInternalServerError, "shttpmocksrv: %v", err)
@@ -146,7 +236,7 @@ func (s *server) respond(method, path, scenario string) reply {
 
 	for i := range routes {
 		rt := &routes[i]
-		if !rt.matches(method, path) {
+		if !rt.matches(host, method, path) {
 			continue
 		}
 		resp := rt.response
@@ -181,7 +271,10 @@ func (s *server) loadRoutes() ([]route, error) {
 	return cfg.Routes, nil
 }
 
-func (rt route) matches(method, path string) bool {
+func (rt route) matches(host, method, path string) bool {
+	if rt.Host != "" && !strings.EqualFold(rt.Host, host) {
+		return false
+	}
 	if rt.Method != "" && !strings.EqualFold(rt.Method, method) {
 		return false
 	}

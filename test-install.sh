@@ -89,6 +89,7 @@ install --routes "$WORK/my-routes.json" || { cat "$WORK/install.log"; exit 1; }
 start_server
 
 # THEN each URL gets the user's response over HTTP and HTTPS
+check "other host refused" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: unknown.example.test' http://localhost:18080/a)" "404"
 check "route /a" "$(curl -s http://localhost:18080/a)" '{"url": "a"}'
 check "route /b/* status and body" "$(curl -s -w ' %{http_code}' http://localhost:18080/b/x/y)" '{"url": "b"} 201'
 check "scenario header" "$(curl -s -w ' %{http_code}' -H 'X-Mock-Scenario: other' http://localhost:18080/a)" '{"url": "a-other"} 202'
@@ -140,7 +141,7 @@ check "hosts: block not duplicated by a second run" "$(grep -c '^# BEGIN shttpmo
 # WHEN installing the launchd agent twice with the same arguments, then with another port
 SVC_DIR="$WORK/svc"
 svc_install() {
-    "$ROOT/install.sh" --base-url "$RELEASE" --name "$SVC_NAME" --dir "$SVC_DIR" --http-port "$1" --https-port 18444 \
+    "$ROOT/install.sh" --base-url "$RELEASE" --name "$SVC_NAME" --dir "$SVC_DIR" --http-port "$1" --https-port 18444 --hostnames "localhost" \
         --routes "$WORK/my-routes.json" >"$WORK/svc.log" 2>&1
 }
 svc_pid() { launchctl print "gui/$(id -u)/local.$SVC_NAME" | awk '/^[[:space:]]*pid = /{print $3}'; }
@@ -158,7 +159,7 @@ check "service: answers on the new port" "$(curl -s http://localhost:18082/a)" '
 check "service: agent removed on uninstall" "$(launchctl print "gui/$(id -u)/local.$SVC_NAME" >/dev/null 2>&1 && echo loaded || echo gone)" "gone"
 
 # WHEN installing in dev mode (build from the local source)
-dev_install() { "$ROOT/install.sh" --dev --name shttpmocksrv-test --dir "$WORK/dev" --no-service "$@" >"$WORK/dev.log" 2>&1; }
+dev_install() { "$ROOT/install.sh" --dev --name shttpmocksrv-test --dir "$WORK/dev" --hostnames localhost --no-service "$@" >"$WORK/dev.log" 2>&1; }
 dev_install || { cat "$WORK/dev.log"; exit 1; }
 
 # THEN the binary is built locally, not downloaded, and a second run keeps it
@@ -172,7 +173,7 @@ check "dev: needs the source next to the script" "$("$WORK/lonely/install.sh" --
 
 # WHEN a downloaded binary does not match SHA256SUMS
 echo "tampered" >>"$WORK/release/shttpmocksrv-darwin-$(uname -m | sed 's/x86_64/amd64/')"
-RESULT="$("$ROOT/install.sh" --base-url "$RELEASE" --name shttpmocksrv-test --dir "$WORK/other" --no-service 2>&1 || true)"
+RESULT="$("$ROOT/install.sh" --base-url "$RELEASE" --name shttpmocksrv-test --dir "$WORK/other" --hostnames localhost --no-service 2>&1 || true)"
 
 # THEN the install is refused
 check "bad checksum rejected" "$(echo "$RESULT" | grep -c 'checksum mismatch')" "1"
